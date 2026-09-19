@@ -298,7 +298,8 @@ POST /api/alerts/:id/comments
 | DELETE | `/api/users/:id/notification-channels/:channel_id` | администратор | — |
 | GET/POST | `/api/notifications/rules` | domain: notifications | матрица «кого извещать по какой тревоге» |
 | GET/DELETE | `/api/notifications/rules/:id` | domain: notifications | — |
-| GET | `/api/notifications/recipients` | domain: notifications (чтение) | `[{"id", "username"}]` — список для выбора получателей, без прав `/api/users` |
+| GET | `/api/notifications/recipients` | domain: notifications (чтение) | `[{"id", "username"}]` — список пользователей для выбора получателей, без прав `/api/users` |
+| GET | `/api/notifications/recipient-roles` | domain: notifications (чтение) | `[{"id", "name"}]` — то же самое, но список ролей, без прав `/api/roles` |
 | GET/PUT | `/api/settings/notifications` | domain: notifications | SMTP/Telegram-реквизиты — см. ниже |
 
 ```
@@ -317,7 +318,7 @@ POST /api/notifications/rules
   "subnets": [], "profiles": [], "device_ids": [],
   "active_from": null, "active_to": null, "days_of_week": [],
   "notify_on_activate": true, "notify_on_clear": true,
-  "recipients": ["<user-uuid>", ...]
+  "recipients": ["<user-uuid>", {"role": "<role-uuid>"}, ...]
 }
 ```
 
@@ -328,6 +329,13 @@ POST /api/notifications/rules
 устройства (обратное поведение по сравнению с окнами обслуживания выше). `active_from`/
 `active_to` — либо оба заданы, либо оба пусты (`400` на смешанный вариант); время — UTC.
 `days_of_week` — подмножество `["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]`.
+
+`recipients` — массив без тега варианта (`#[serde(untagged)]`): голая UUID-строка — id
+пользователя, объект `{"role": "<uuid>"}` — целая роль. Роль резолвится в её **текущий**
+состав в момент срабатывания тревоги, не в момент сохранения правила. Если один и тот же
+пользователь получился в итоговом списке дважды (указан напрямую и одновременно состоит в
+указанной роли, или попал под несколько подошедших правил сразу) — уведомление
+дедуплицируется, повторно не уходит.
 
 ```
 PUT /api/settings/notifications
@@ -347,7 +355,7 @@ PUT /api/settings/notifications
 | GET | `/api/topology/rules/:id` | domain: topology (чтение) | одно правило |
 | DELETE | `/api/topology/rules/:id` | domain: topology (запись) | удалить |
 | GET | `/api/topology/rules/:name/neighbors/:device_id` | domain: topology (чтение) | соседи одного устройства по этому правилу (по имени правила, не `id`) |
-| GET | `/api/topology/rules/:name/edges` | domain: topology (чтение) | весь граф связей по этому правилу |
+| GET | `/api/topology/rules/:name/edges` | domain: topology (чтение) | связи по этому правилу — см. ниже |
 | PUT | `/api/topology/rules/:name/hierarchy/:device_a/:device_b` | domain: topology (запись) | вручную задать направление связи — `{"upstream_device_id": "..."}` |
 | DELETE | `/api/topology/rules/:name/hierarchy/:device_a/:device_b` | domain: topology (запись) | сбросить ручное направление, вернуться к автоматическому по рангу |
 
@@ -366,6 +374,12 @@ PUT /api/settings/notifications
 `claimed_neighbors_expression: null` — правило только группирует устройства по общему
 идентификатору, без утверждения о прямой связи. `rank_expression: null` — правило не
 участвует в определении направления (кто чей аплинк), см. [Топология](features/topology.md#направление--кто-чей-аплинк).
+`GET .../edges` принимает `search` (по IP любого из двух устройств пары),
+`status=confirmed|unconfirmed`, `direction=determined|undetermined`,
+`sort_by=device_a|device_b|status|direction` (по умолчанию `device_a`), `sort_dir`,
+`page`/`page_size` (по умолчанию 50, максимум 500) — возвращает `{"items": [...], "total":
+N}`, тот же формат страницы, что у списочных эндпоинтов из «Базовых соглашений» выше.
+
 `watched_metrics: null` — discovery сам определяет, какие метрики упомянуты в выражениях
 выше, и пересчитывает правило сразу после их обновления; можно указать список явно, если
 имя метрики вычисляется динамически и не видно текстовым разбором. Все три выражения
@@ -411,7 +425,7 @@ PUT /api/settings/notifications
 | POST | `/api/assistant/conversations/:id/messages` | требует сессию, владелец разговора | отправить сообщение — см. ниже |
 | POST | `/api/assistant/conversations/:id/messages/:mid/confirm` | требует сессию, владелец разговора | выполнить предложенное действие |
 | POST | `/api/assistant/conversations/:id/messages/:mid/reject` | требует сессию, владелец разговора | отклонить предложенное действие |
-| GET/PUT | `/api/settings/ai-assistant` | администратор | реквизиты провайдера — `{"enabled", "provider", "client_id", "client_secret"}` |
+| GET/PUT | `/api/settings/ai-assistant` | администратор | реквизиты провайдера — `{"enabled", "provider", "client_id", "client_secret"}` (GigaChat), `{"enabled", "provider", "openrouter_api_key", "openrouter_model"}` (OpenRouter) либо `{"enabled", "provider", "self_hosted_base_url", "self_hosted_api_key", "self_hosted_model"}` (self-hosted), см. ниже |
 
 Разговор, принадлежащий другому пользователю — `404`, не `403` (чужие id не
 подтверждаются даже фактом существования).
@@ -426,8 +440,17 @@ POST /api/assistant/conversations/:id/messages
 `status: "awaiting_confirmation"` — модель предложила изменяющее действие (`message.
 tool_call: {"name", "arguments"}`), ничего ещё не выполнено — нужно явно вызвать
 `.../confirm` или `.../reject` на `message.id`, прежде чем отправлять следующее
-сообщение в этот разговор. `503` с текстом «ИИ-ассистент выключен...» или «не настроены
-client_id/client_secret...», если администратор ещё не подключил провайдера.
+сообщение в этот разговор. `503`, если администратор ещё не подключил провайдера (текст —
+«ИИ-ассистент выключен...», либо «не настроены client_id/client_secret...» для GigaChat /
+«не настроены openrouter_api_key/openrouter_model...» для OpenRouter / «не настроены base
+URL/модель провайдера ИИ-ассистента (self-hosted)...» для self-hosted, в зависимости от
+того, какого поля не хватает у выбранного `provider`).
+
+`provider` в настройках — `"gigachat"`, `"openrouter"` или `"self_hosted"`; поле `enabled`
+не помогает, если не заполнены обязательные поля именно выбранного провайдера, — ответ
+явно называет, какого поля не хватает. У self-hosted `self_hosted_api_key` — единственное
+необязательное поле среди всех трёх провайдеров: сервер без авторизации настраивается без
+него, запрос уйдёт без заголовка `Authorization` вовсе.
 
 **Права ассистента внутри разговора — это права того же пользователя, который его
 ведёт**, не отдельная привилегия: если у вас нет `domain: alerts (запись)`, просьба
