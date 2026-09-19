@@ -88,7 +88,7 @@ rate_limit_per_source_per_sec = 20
 
 ## Уведомления и окна обслуживания
 
-В `config.toml` для них нет секции — оба ресурса, как профили и конфигурации дискaверинга
+В `config.toml` для них нет секции — оба ресурса, как профили и конфигурации дискаверинга
 выше, хранятся не в файле, а в базе данных агента и управляются через REST API/дашборд:
 `PUT/POST/DELETE /api/notifications/channels`, `/api/notifications/rules` и
 `/api/maintenance-windows`. Поля и семантика каждого — [Уведомления](features/notifications.md),
