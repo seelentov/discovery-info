@@ -1,25 +1,140 @@
 # Справочник конфигурации
 
-Основные настройки хранятся в `config.toml`: `/etc/discovery-agent/config.toml` при
-установке через `.deb`/`.rpm`, файл рядом с `docker-compose.yml` при установке через
-Docker. После правки файла — перезапустите сервис
-(`sudo systemctl restart discovery-agent` или `docker compose restart`).
+Основные настройки хранятся в `config.toml`. Для `.deb`/`.rpm` это
+`/etc/discovery-agent/config.toml`. В текущем Docker Compose образ получает файл
+`/app/config.toml` из `deploy/config.example.toml` во время сборки; соседний файл на хосте
+сам по себе контейнер не читает. Для собственной конфигурации либо измените источник и
+пересоберите образ, либо добавьте в Compose bind mount:
+
+```yaml
+volumes:
+  - ./config.toml:/app/config.toml:ro
+```
+
+После правки секций, читаемых при старте, перезапустите сервис
+(`sudo systemctl restart discovery-agent` или `docker compose restart`). Для изменения
+исходного `deploy/config.example.toml` нужен `docker compose up -d --build`.
 
 Большинство повседневных настроек (профили, конфигурации дискаверинга, уведомления, окна
 обслуживания) удобнее менять через веб-дашборд, не редактируя файл вручную — они
 сохраняются в базу данных, а не в `config.toml`. Ниже — то, что настраивается именно
 через файл.
 
+Важно: `[storage]`, `[server]`, `[logging]`, `[concurrency]`, `[worker_poll_interval]` и
+`[reclaim]` читаются при старте и требуют перезапуска. `[poll_intervals]` используется
+только как начальное заполнение настроек в пустой базе; после первого запуска актуальные
+значения живут в базе данных и меняются в «Настройки» или через REST API.
+
+## `[storage]` — базы данных и маршрутизация
+
+```toml
+[storage]
+default_database = "main"
+
+[[storage.databases]]
+name = "main"
+kind = "sqlite"                 # postgres | mysql | sqlite | memory
+file_path = "/var/lib/discovery-agent/discovery.sqlite3"
+# host, port, database, username, password — для postgres/mysql
+# pool_max_connections = 64
+# sqlite_busy_timeout_secs = 5
+
+[storage.routing]
+# jobs = "main"
+# devices = "main"
+```
+
+`default_database` указывает подключение для доменов без отдельного маршрута. Пустой
+список подключений включает временное `sqlite::memory:`-хранилище, которое не переживает
+перезапуск. Поддерживаются `postgres`, `mysql`, `sqlite` и `memory`. Размер пула должен
+учитывать сумму воркеров из `[concurrency]` и запас под REST/дашборд.
+
 ## `[server]` — сетевые настройки дашборда
 
 ```toml
 [server]
 addr = "0.0.0.0:8088"
+enable_rest = true
+enable_webui = true
 ```
 
 Адрес и порт, на котором слушает веб-интерфейс. См.
 [раздел про безопасность](installation.md#безопасность-и-сеть) — держите этот порт за
-firewall/VPN.
+firewall/VPN. `enable_rest = false` отключает весь `/api/*`, поэтому встроенный webui при
+этом работать не сможет. `enable_webui = false` оставляет REST API без встроенной статики.
+Оба значения `false` делают HTTP-интерфейс недоступным; после изменения нужен перезапуск.
+
+## `[logging]` — журналирование
+
+```toml
+[logging]
+level = "info"
+level_console = ""       # пусто = использовать level
+level_file = ""
+level_dashboard = ""
+file = "logs/discovery.log"  # пусто = отключить файловый sink
+file_rotation = "daily"      # daily | hourly | never
+buffer_size = 1000            # размер журнала в дашборде
+```
+
+Пустые уровни наследуют общий `level`. Файл и буфер дашборда — независимые приёмники;
+изменения применяются после перезапуска.
+
+## `[concurrency]` и `[worker_poll_interval]` — очереди
+
+`[concurrency]` задаёт число одновременно работающих обработчиков каждой очереди:
+
+```toml
+[concurrency]
+discovery = 4
+snmp_poll = 8
+dedup = 4
+profile_apply = 4
+metric_poll = 8
+alert_eval = 4
+reachability_poll = 8
+service_check_poll = 8
+notification_dispatch = 8
+topology_recompute = 8
+```
+
+`[worker_poll_interval]` задаёт задержку между попытками claim новых заданий в миллисекундах
+для тех же очередей (`discovery_ms`, `snmp_poll_ms`, `dedup_ms`, `profile_apply_ms`,
+`metric_poll_ms`, `alert_eval_ms`, `reachability_poll_ms`, `service_check_poll_ms`,
+`notification_dispatch_ms`, `topology_recompute_ms`). Это не период опроса устройств.
+При увеличении concurrency увеличьте пул подключений к БД и учитывайте нагрузку на сеть.
+
+## `[reclaim]` — возврат зависших заданий
+
+```toml
+[reclaim]
+check_interval_secs = 30
+stale_after_secs = 300
+```
+
+Цикл с указанным интервалом возвращает в `pending` задания, оставшиеся в `in_progress`
+после падения воркера. `stale_after_secs` должен быть больше нормальной длительности самого
+долгого задания, иначе живое медленное задание может быть запущено повторно.
+
+## `[poll_intervals]` — начальные интервалы опроса
+
+```toml
+[poll_intervals]
+identity_secs = 300
+metric_secs = 15
+profiles_reload_secs = 5
+discovery_schedule_check_secs = 30
+reachability_secs = 60
+metric_history_cleanup_secs = 3600
+alert_cleanup_secs = 3600
+dead_device_cleanup_secs = 3600
+logs_cleanup_secs = 3600
+trap_ttl_sweep_secs = 60
+```
+
+При пустом хранилище настроек эти значения один раз записываются в базу. На последующих
+запусках изменение секции в файле не меняет работающую систему: используйте «Настройки»
+или `PUT /api/settings/poll-intervals`.
 
 ## `[license]` — лицензия
 
@@ -71,12 +186,14 @@ enabled = false          # по умолчанию выключено
 bind_addr = "0.0.0.0:1162"   # не стандартный 162 — тот требует root/CAP_NET_BIND_SERVICE
 ingest_concurrency = 8
 rate_limit_per_source_per_sec = 20
+allowed_sources = []          # IP или CIDR; пусто = принимать от любого источника
 
 [syslog]
 enabled = false
 bind_addr = "0.0.0.0:1514"   # не стандартный 514, та же причина
 ingest_concurrency = 8
 rate_limit_per_source_per_sec = 20
+allowed_sources = []          # IP или CIDR; пусто = принимать от любого источника
 ```
 
 Если ваши устройства настроены слать trap/syslog на стандартный порт (162/514) —

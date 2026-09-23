@@ -30,6 +30,27 @@ sudo dnf install ./discovery-agent.rpm
 | Данные (база данных) | `/var/lib/discovery-agent/` |
 | Управление сервисом | `systemctl status discovery-agent`, `journalctl -u discovery-agent` |
 
+При первом запуске нужно заранее задать пароль начального администратора. Значения
+`admin/admin` по умолчанию нет: сервис не поднимет HTTP-интерфейс, пока не получит
+непустой пароль длиной не менее 8 символов через
+`DISCOVERY_BOOTSTRAP_ADMIN_PASSWORD`. Пакет создаёт
+`/etc/discovery-agent/discovery.env` и автоматически запускает сервис; если первый
+запуск завершился ошибкой из-за отсутствующего пароля, добавьте в этот файл строку:
+
+```dotenv
+DISCOVERY_BOOTSTRAP_ADMIN_PASSWORD=<одноразовый-пароль-для-первого-входа>
+```
+
+Затем перезапустите сервис:
+
+```bash
+sudoedit /etc/discovery-agent/discovery.env
+sudo systemctl restart discovery-agent
+```
+
+Не удаляйте существующую строку `DISCOVERY_SECRET_KEY`: она нужна для расшифровки уже
+сохранённых секретов и должна переживать обновления.
+
 **Удаление:** `sudo apt remove discovery-agent` (Debian/Ubuntu) останавливает сервис, но
 **сохраняет** ваши данные — переустановка ничего не теряет. Полное удаление данных —
 `sudo apt purge discovery-agent`. На Fedora/RHEL `sudo dnf remove discovery-agent` всегда
@@ -50,8 +71,13 @@ sudo dnf install ./discovery-agent.rpm
 
 ```bash
 cp .env.example .env
-# откройте .env и впишите значение DISCOVERY_SECRET_KEY, например:
-#   openssl rand -base64 32
+# откройте .env и задайте оба значения:
+#   DISCOVERY_SECRET_KEY=<openssl rand -base64 32>
+#   DISCOVERY_BOOTSTRAP_ADMIN_PASSWORD=<одноразовый-пароль-длиной-не-менее-8-символов>
+
+# в docker-compose.yml, в environment сервиса discovery-agent, должны быть обе строки:
+#   DISCOVERY_SECRET_KEY: ${DISCOVERY_SECRET_KEY:?set DISCOVERY_SECRET_KEY in .env}
+#   DISCOVERY_BOOTSTRAP_ADMIN_PASSWORD: ${DISCOVERY_BOOTSTRAP_ADMIN_PASSWORD:?set DISCOVERY_BOOTSTRAP_ADMIN_PASSWORD in .env}
 
 docker compose up -d --build
 ```
@@ -112,12 +138,29 @@ xattr -d com.apple.quarantine ./discovery-agent
 
 ![Экран входа](images/01-login.png)
 
-Логин по умолчанию: **admin / admin**.
+Логин начального пользователя: **admin**. Пароль — значение
+`DISCOVERY_BOOTSTRAP_ADMIN_PASSWORD`, которое вы задали перед первым запуском; публичного
+пароля по умолчанию нет. Система сразу потребует сменить этот начальный пароль — это
+ожидаемое поведение. После смены пароля дашборд открывается полностью.
 
-Система сразу потребует сменить пароль — это ожидаемое поведение, не ошибка: все
-разделы, включая административные, заблокированы до смены пароля с этой парой по
-умолчанию. Задайте новый пароль на предложенной форме — после этого дашборд открывается
-полностью.
+Для готового архива из Варианта 4 задайте обе переменные при запуске:
+
+**macOS/Linux:**
+```bash
+DISCOVERY_SECRET_KEY=<секретный-ключ> \
+DISCOVERY_BOOTSTRAP_ADMIN_PASSWORD=<одноразовый-пароль> \
+./discovery-agent
+```
+
+**Windows (PowerShell):**
+```powershell
+$env:DISCOVERY_SECRET_KEY="<секретный-ключ>"
+$env:DISCOVERY_BOOTSTRAP_ADMIN_PASSWORD="<одноразовый-пароль>"
+.\discovery-agent.exe
+```
+
+Вариант 3 (ручной systemd-запуск) использует тот же принцип: добавьте обе переменные в
+`EnvironmentFile` юнита до первого запуска.
 
 ## Первая настройка: увидеть первое устройство
 
@@ -134,6 +177,51 @@ xattr -d com.apple.quarantine ./discovery-agent
 3. Не обязательно ждать расписания — на карточке конфигурации в разделе «Дискаверинг»
    есть кнопка «▶» (запустить сейчас). После этого устройство должно появиться на странице
    **«Устройства»**.
+
+## Обновление, резервная копия и откат
+
+Перед обновлением сохраните данные, конфигурацию и секреты. Особенно важно сохранить
+`DISCOVERY_SECRET_KEY`: без прежнего значения уже зашифрованные SNMPv3/SSH/уведомительные
+секреты нельзя расшифровать.
+
+Для `.deb`/`.rpm`:
+
+```bash
+sudo systemctl stop discovery-agent
+sudo tar -C /var/lib -czf discovery-data-$(date +%F).tar.gz discovery-agent
+sudo cp -a /etc/discovery-agent/config.toml /etc/discovery-agent/discovery.env \
+  /path/to/secure-backup/
+sudo apt install ./discovery-agent.deb   # или: sudo dnf install ./discovery-agent.rpm
+sudo systemctl start discovery-agent
+sudo journalctl -u discovery-agent -n 100 --no-pager
+```
+
+При старте discovery автоматически применяет ожидающие миграции базы данных. Не редактируйте
+файл systemd-юнита из пакета: настройки окружения храните в
+`/etc/discovery-agent/discovery.env`, а изменения конфигурации — в
+`/etc/discovery-agent/config.toml`.
+
+Для Docker остановите контейнер перед копированием SQLite из `/data`, либо используйте
+штатный backup инструмент вашей внешней СУБД (`pg_dump` для PostgreSQL и соответствующий
+инструмент для MySQL). Затем обновите образ и запустите его:
+
+```bash
+docker compose stop
+# сохраните содержимое volume discovery-data или сделайте dump внешней БД
+docker compose up -d --build
+docker compose logs --tail=100 discovery-agent
+```
+
+Сценарий Compose из этой документации собирает образ локально; если ваша поставка использует
+готовый registry-образ, сначала получите новый образ по принятой в вашей инфраструктуре
+процедуре. Не удаляйте Docker volume и не пересоздавайте `.env`: в нём должен остаться прежний
+`DISCOVERY_SECRET_KEY`.
+
+Откат выполняйте только после остановки сервиса и проверки резервной копии. Возврат бинарника
+на старую версию не гарантирует совместимость с уже применённой схемой: при необходимости
+отката восстанавливайте согласованную пару «версия + backup базы» и возвращайте соответствующие
+`config.toml` и `DISCOVERY_SECRET_KEY`. После запуска проверьте вход, список устройств,
+очереди и последние записи журнала.
 
 ## Про лицензию — коротко
 
