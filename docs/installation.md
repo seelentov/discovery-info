@@ -34,8 +34,8 @@ sudo dnf install ./discovery-agent.rpm
 `admin/admin` по умолчанию нет: сервис не поднимет HTTP-интерфейс, пока не получит
 непустой пароль длиной не менее 8 символов через
 `DISCOVERY_BOOTSTRAP_ADMIN_PASSWORD`. Пакет создаёт
-`/etc/discovery-agent/discovery.env` и автоматически запускает сервис; если первый
-запуск завершился ошибкой из-за отсутствующего пароля, добавьте в этот файл строку:
+`/etc/discovery-agent/discovery.env` и на чистой установке не запускает сервис, пока
+пароль не задан; после добавления строки ниже сервис можно запустить:
 
 ```dotenv
 DISCOVERY_BOOTSTRAP_ADMIN_PASSWORD=<одноразовый-пароль-для-первого-входа>
@@ -45,7 +45,7 @@ DISCOVERY_BOOTSTRAP_ADMIN_PASSWORD=<одноразовый-пароль-для-�
 
 ```bash
 sudoedit /etc/discovery-agent/discovery.env
-sudo systemctl restart discovery-agent
+sudo systemctl start discovery-agent
 ```
 
 Не удаляйте существующую строку `DISCOVERY_SECRET_KEY`: она нужна для расшифровки уже
