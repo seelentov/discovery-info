@@ -537,3 +537,29 @@ PUT /api/settings/databases
 
 Записи создаёт сам сервер (см. «Побочный эффект» выше) — писать в журнал напрямую нельзя,
 эндпоинта на запись не существует. Подробнее — [Журнал](features/journal.md).
+## Дополнительные operator и alert endpoints
+
+Для активных тревог доступны отдельные операторские состояния:
+
+- POST /api/alerts/:id/acknowledge — подтвердить с сохранением пользователя и времени;
+- POST /api/alerts/:id/unacknowledge — снять подтверждение;
+- POST /api/alerts/:id/snooze с телом {"until": "2026-09-25T18:00:00Z"} — временно
+  подавить activation/recovery;
+- POST /api/alerts/:id/unsnooze — снять подавление.
+
+В ответе тревоги могут присутствовать acknowledgement, snooze, escalation и flapping.
+В теле правила уведомлений повторная доставка задаётся полями
+repeat_after_seconds, repeat_interval_seconds, max_repeats и escalation_levels; нулевые
+значения сохраняют исходное поведение только с activation/clear.
+
+Для устройств добавлены:
+
+- POST /api/service-discovery — bounded-проверка SNMP/SSH/HTTP/HTTPS/TCP для IP;
+- GET/POST /api/devices/:id/actions и /api/devices/:id/actions/:action — история и запуск
+  test, poll-now, rediscover, backup;
+- GET/DELETE /api/devices/:id/actions/jobs/:job_id — результат или отмена ожидающего job;
+- GET /api/devices/:id/backups и GET /api/devices/:id/backups/:job_id — успешные backup;
+- GET /api/devices/:id/backups/:left/diff/:right — bounded unified diff двух backup.
+
+Операторские маршруты требуют права Devices:Write; неуспешный service-discovery не создаёт
+устройство, а backup отдаёт только redacted/normalized конфигурацию.
